@@ -432,6 +432,26 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
 }
 #toast.show { transform: translate(-50%, 0) }
 
+/* ---------- 15a. LOCK SCREEN (save files) ------------------------- */
+#gate { position: fixed; inset: 0; z-index: 60; overflow-y: auto; background: var(--bg); background-image: radial-gradient(var(--hl) 1px, transparent 1px); background-size: 18px 18px; display: grid; place-items: center; padding: 24px 16px }
+#gate[hidden] { display: none }
+body.locked { overflow: hidden }
+.gbox { width: min(460px, 100%); margin: 0; padding: 22px 20px }
+.glogo { text-align: center; color: var(--gold); font-size: clamp(14px, 4vw, 20px); line-height: 1.5; margin: 4px 0 16px; text-shadow: 2px 2px 0 var(--line) }
+.gfiles { display: grid; gap: 10px }
+.gfile { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; text-align: left; padding: 14px 12px; font-size: 11px; line-height: 1.5 }
+.gfile.on { background: var(--gold); color: var(--og) }
+.gnum { display: grid; place-items: center; width: 28px; height: 28px; border: 3px solid currentColor; font-size: 11px }
+.gpw { margin-top: 16px }
+.gpw input { font-size: 1.1em }
+.gerr { min-height: 1.6em; margin-top: 8px; font-size: 10px; color: #e5484d }
+.shake { animation: gshake .35s }
+@keyframes gshake { 20%, 60% { transform: translateX(-8px) } 40%, 80% { transform: translateX(8px) } }
+
+/* Settings: current save file + rename */
+.sfile { border: 3px solid var(--line); border-radius: var(--r); background: var(--bg); padding: 10px 12px; margin: 8px 0 6px }
+.sfname { font-size: 14px; line-height: 1.5; color: var(--gold); word-break: break-word }
+
 /* ---------- 15b. OFFICE TRAIL (full-screen mini-game) --------------- */
 #trail {
   position: fixed; inset: 0; z-index: 45; overflow-y: auto;
@@ -530,7 +550,7 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
   .d20.pd { width: 64px; height: 70px; font-size: 18px; padding-top: 8px }
 }
 @media (prefers-reduced-motion: reduce) {
-  .fl, .bub, .d20.spin, body.fri .card, .tme.go { animation: none }
+  .fl, .bub, .d20.spin, body.fri .card, .tme.go, .shake { animation: none }
 }
 </style>
 </head>
@@ -647,6 +667,8 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
 <div class="mod" id="mod"><div class="box" id="modbox"></div></div>   <!-- player profile -->
 <div class="mod" id="smod"><div class="box" id="sbox"></div></div>    <!-- settings -->
 <div id="toast" class="px"></div>
+<!-- Lock screen: choose a save file and enter its password (drawn by gateDraw) -->
+<div id="gate" hidden></div>
 <!-- Office Trail mini-game overlay (opened from Settings) -->
 <!-- Cubicle Dash mini-game overlay (opened from Settings) -->
 <div id="dash" hidden><button class="px" id="dashX" title="Exit Cubicle Dash" aria-label="Exit Cubicle Dash">✕</button>
@@ -673,6 +695,10 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
    and then render() redraws the page from state. Totals, levels,
    streaks and achievements are never stored; they're recalculated from
    the quest log every time.
+
+   SAVE FILES: the app opens on a lock screen (section 0). Each save file
+   has its own password and its own separate data (SAVE.ls / SAVE.db /
+   SAVE.fbTeam). Nothing loads or saves until a file is unlocked.
 
    WHERE DATA IS SAVED (decided at startup in init())
      1. Firebase, if FIREBASE.config is filled in (section 12b)
@@ -750,13 +776,13 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
   const FIREBASE = Object.assign(
     {
       config: {
-        apiKey: "AIzaSyDbISqhBKJfczpmvgmo-DW8oYmZkm98nSQ",
-        authDomain: "office-odyssey-71796.firebaseapp.com",
-        projectId: "office-odyssey-71796",
-        storageBucket: "office-odyssey-71796.firebasestorage.app",
-        messagingSenderId: "179950528050",
-        appId: "1:179950528050:web:18da8896ca0528e5fafe2b"
-      },
+  apiKey: "AIzaSyDbISqhBKJfczpmvgmo-DW8oYmZkm98nSQ",
+  authDomain: "office-odyssey-71796.firebaseapp.com",
+  projectId: "office-odyssey-71796",
+  storageBucket: "office-odyssey-71796.firebasestorage.app",
+  messagingSenderId: "179950528050",
+  appId: "1:179950528050:web:18da8896ca0528e5fafe2b"
+},
       // config: { apiKey: "AIza…", authDomain: "your-app.firebaseapp.com", projectId: "your-app", appId: "1:123:web:abc" },
       team: "cubicle-quest-team",
       signIn: "anonymous",
@@ -764,7 +790,66 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
     window.CUBICLE_QUEST_FIREBASE || {},
   );
 
+  /* ==== SAVE FILES (password protected) ==================================
+     The lock screen lists these files. Each one is a completely separate
+     team: its own players, quest log, guilds, graveyard and scores.
+     Passwords are NOT written here. `check` is a one-way code made from the
+     password, only used to say "wrong password"; the password itself also
+     decides where the file's data is stored, so without it the page can't
+     find that data at all. Passwords ignore upper/lower case.
+     legacy: true = the first time this file is unlocked, it takes over the
+     data saved before save files existed, so it resumes where you left off.
+     To add a file or change a password, ask Claude for a new `check`
+     (or compute it with saveCheck(passwordCode("new password"))).          */
+  // name = the default name; each file can be renamed in its Settings (shared with everyone)
+  const SAVE_FILES = [
+    { name: "File 1", check: "cd678170bcd11983", legacy: true },
+    { name: "File 2", check: "9b84d1183e48174c" },
+  ];
+
   /* ==== 1. HELPERS ======================================================= */
+
+  /**
+   * SHA-256 of a text, as hex. Self-contained so the lock screen works
+   * everywhere (some browsers hide crypto.subtle on file:// pages).
+   */
+  function sha256(text) {
+    const bytes =
+        typeof TextEncoder !== "undefined"
+          ? Array.from(new TextEncoder().encode(text))
+          : Array.from(unescape(encodeURIComponent(text)), (ch) => ch.charCodeAt(0)), // UTF-8 bytes either way
+      ror = (v, n) => (v >>> n) | (v << (32 - n)),
+      K = [];
+    let H = [];
+    for (let c = 2, n = 0; n < 64; c++) {
+      let prime = true;
+      for (let d = 2; d * d <= c; d++) if (c % d === 0) prime = false;
+      if (!prime) continue;
+      if (n < 8) H[n] = (Math.pow(c, 1 / 2) * 4294967296) | 0;
+      K[n++] = (Math.pow(c, 1 / 3) * 4294967296) | 0;
+    }
+    const bitLen = bytes.length * 8;
+    bytes.push(0x80);
+    while (bytes.length % 64 !== 56) bytes.push(0);
+    for (let i = 7; i >= 0; i--) bytes.push(i >= 4 ? 0 : (bitLen >>> (i * 8)) & 255);
+    for (let off = 0; off < bytes.length; off += 64) {
+      const w = [];
+      for (let i = 0; i < 16; i++) w[i] = (bytes[off + i * 4] << 24) | (bytes[off + i * 4 + 1] << 16) | (bytes[off + i * 4 + 2] << 8) | bytes[off + i * 4 + 3];
+      for (let i = 16; i < 64; i++) {
+        const s0 = ror(w[i - 15], 7) ^ ror(w[i - 15], 18) ^ (w[i - 15] >>> 3),
+          s1 = ror(w[i - 2], 17) ^ ror(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+      }
+      let [a, b, c, d, e, f, g, h] = H;
+      for (let i = 0; i < 64; i++) {
+        const t1 = (h + (ror(e, 6) ^ ror(e, 11) ^ ror(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) | 0,
+          t2 = ((ror(a, 2) ^ ror(a, 13) ^ ror(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+        [h, g, f, e, d, c, b, a] = [g, f, e, (d + t1) | 0, c, b, a, (t1 + t2) | 0];
+      }
+      H = H.map((v, i) => (v + [a, b, c, d, e, f, g, h][i]) | 0);
+    }
+    return H.map((v) => (v >>> 0).toString(16).padStart(8, "0")).join("");
+  }
 
   const $ = (s) => document.querySelector(s),
     $$ = (s) => Array.from(document.querySelectorAll(s));
@@ -2225,12 +2310,18 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
      every 3 minutes. EXPORT downloads a backup and shows it as copyable
      text; IMPORT restores one.                                          */
 
-  const setStatus = (t) => ($("#status").textContent = t);
+  let lastStatus = ""; // remembered so a renamed file's name can be shown straight away
+  /** The line under the title: "<save file name> · <what's happening>". */
+  const setStatus = (t) => {
+    lastStatus = t;
+    $("#status").textContent = (SAVE ? fileName(SAVE.i) + " · " : "") + t;
+  };
   /** Save after any change. Always call this after editing state. */
   function persist() {
+    if (!SAVE) return; // still on the lock screen
     state.rev = Date.now();
     try {
-      localStorage.setItem("xpq", JSON.stringify(state));
+      localStorage.setItem(SAVE.ls, JSON.stringify(state));
     } catch (e) {}
     if (fb) return fbPush(); // Firebase: save just what changed
     if (!dbDoc) return;
@@ -2261,22 +2352,39 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
   /** Startup: load local copy, then connect to the shared database (or go offline). */
   async function init() {
     try {
-      const l = localStorage.getItem("xpq");
-      if (l) applyRemote(l);
+      const l = localStorage.getItem(SAVE.ls) || (SAVE.legacy ? localStorage.getItem("xpq") : null); // File 1 picks up pre-save-file data
+      if (l) {
+        applyRemote(l);
+        localStorage.setItem(SAVE.ls, JSON.stringify(state)); // keep this file's copy in its own space
+      }
     } catch (e) {}
     render();
     if (FIREBASE.config && FIREBASE.config.projectId && (await fbStart())) return;
     try {
       const db = await claude.use("db");
       if (db) {
-        dbDoc = db.doc("app/state");
+        dbDoc = db.doc("app/" + SAVE.db); // this save file's own record
         const t = setTimeout(() => setStatus("offline mode (saved in this browser)"), 10000);
         dbDoc.onSnapshot(
           (snap) => {
             clearTimeout(t);
             if (saving || dirty) return;
             if (snap.exists && snap.data() && snap.data().json) applyRemote(snap.data().json);
-            else if (!loaded) dbDoc.set({ json: JSON.stringify(state) }).catch(() => {});
+            else if (!loaded)
+              (async () => {
+                // Empty save file: File 1 (legacy) takes over the old shared record, others start fresh
+                if (SAVE.legacy)
+                  try {
+                    const old = await db.doc("app/state").get();
+                    if (old.exists && old.data() && old.data().json) {
+                      applyRemote(old.data().json);
+                      prevLevels = null; // no level-up pop-ups for data that was already there
+                      prevAch = null;
+                      render();
+                    }
+                  } catch (e) {}
+                dbDoc.set({ json: JSON.stringify(state) }).catch(() => {});
+              })();
             if (!loaded) {
               prevLevels = null;
               prevAch = null;
@@ -2310,8 +2418,9 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
   const hhmm = (d) => d.getHours() + ":" + String(d.getMinutes()).padStart(2, "0");
   /** Every 3 minutes (and when the tab is hidden): keep a copy of the data in this browser. */
   function autosave() {
+    if (!SAVE) return; // still on the lock screen
     try {
-      localStorage.setItem("xpq", JSON.stringify(state));
+      localStorage.setItem(SAVE.ls, JSON.stringify(state));
     } catch (e) {}
     if (fb) fbStatus();
     else setStatus(`${dbDoc ? "synced with team" : "offline"} · auto-saved ${hhmm(new Date())}`);
@@ -2412,7 +2521,8 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
      Used only when FIREBASE.config is filled in (see FIREBASE SETTINGS at
      the top of this script). Otherwise nothing here runs.
 
-     LAYOUT IN FIRESTORE (all under teams/<FIREBASE.team>/)
+     LAYOUT IN FIRESTORE (all under teams/<FIREBASE.team>--<save file code>/;
+     each save file from the lock screen gets its own copy of this layout)
        data/meta          { items: { title, sub, fri, settings } }
        data/players       { items: { <id>: player + _i (board order) } }
        data/guilds        { items: { <id>: guild  + _i } }
@@ -2496,9 +2606,11 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
     return L;
   }
   /** Rebuild a state object from fbCache (null if the team has no data yet). */
-  function fbState() {
-    const items = (p) => Object.values(fbCache[p] || {}),
-      all = (pre) => Object.keys(fbCache).filter((p) => p.indexOf(pre) === 0).reduce((a, p) => a.concat(items(p)), []),
+  const fbState = () => fbStateFrom(fbCache);
+  /** Rebuild a state object from a cache-shaped object { "data/players": { id: item }, … }. */
+  function fbStateFrom(cache) {
+    const items = (p) => Object.values(cache[p] || {}),
+      all = (pre) => Object.keys(cache).filter((p) => p.indexOf(pre) === 0).reduce((a, p) => a.concat(items(p)), []),
       ordered = (a) =>
         a.sort((x, y) => (x._i || 0) - (y._i || 0)).map((x) => {
           const y = Object.assign({}, x);
@@ -2506,7 +2618,7 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
           return y;
         }),
       byTime = (a) => a.sort((x, y) => (x.ts || 0) - (y.ts || 0) || String(x.id).localeCompare(String(y.id))),
-      m = fbCache["data/meta"] || {};
+      m = cache["data/meta"] || {};
     return norm({
       title: m.title || "CUBICLE QUEST",
       sub: m.sub || "",
@@ -2592,25 +2704,39 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
     if (!s) return;
     state = s;
     try {
-      localStorage.setItem("xpq", JSON.stringify(state));
+      localStorage.setItem(SAVE.ls, JSON.stringify(state));
     } catch (e) {}
     render();
   }
-  /** First complete load: use the team's data, or seed an empty team with this browser's data. */
-  function fbLoaded() {
-    const remote = fbState();
+  /**
+   * First complete load: use this save file's data. If the file is empty and
+   * it's the legacy file (File 1), move in the data saved before save files
+   * existed (teams/<FIREBASE.team>); otherwise start it with this browser's data.
+   */
+  async function fbLoaded() {
+    let remote = fbState(),
+      moved = false;
+    if (!remote && SAVE.legacy) {
+      try {
+        const old = {},
+          oldRoot = fb.db.collection("teams").doc(String(FIREBASE.team));
+        for (const g of FB_GROUPS) (await oldRoot.collection(g).get()).forEach((d) => (old[g + "/" + d.id] = (d.data() || {}).items || {}));
+        remote = fbStateFrom(old);
+        moved = !!remote;
+      } catch (e) {}
+    }
     fbReady = true;
     prevLevels = null;
     prevAch = null;
     if (remote) {
       state = remote;
       try {
-        localStorage.setItem("xpq", JSON.stringify(state));
+        localStorage.setItem(SAVE.ls, JSON.stringify(state));
       } catch (e) {}
-    } else {
-      fbPush(); // empty team: upload what this browser has
-      toast("📦 NEW FIREBASE TEAM<br>To bring your existing data over, use Backup → Import.");
     }
+    if (!fbState()) fbPush(); // empty file: upload the moved-in data (or this browser's)
+    if (moved) toast(`🔒 ${esc(fileName(SAVE.i).toUpperCase())} IS READY<br>Your team’s data now lives in this password-protected file.`);
+    else if (!remote) toast(`📦 NEW SAVE FILE: ${esc(fileName(SAVE.i).toUpperCase())}<br>To bring in data, use Backup → Import.`);
     render();
   }
   /** Listen to the three collections; the first snapshot from each completes the load. */
@@ -2665,18 +2791,44 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
       } else auth.signInAnonymously().catch(reject);
     });
   }
+  let fbInitP = null;
+  /** Load the SDK and set up Firebase once (shared by the lock screen's names and the app). */
+  function fbInit() {
+    if (!fbInitP)
+      fbInitP = (async () => {
+        await fbLoadSdk();
+        if (!firebase.apps.length) firebase.initializeApp(FIREBASE.config);
+        const db = firebase.firestore();
+        try {
+          await db.enablePersistence({ synchronizeTabs: true }); // offline cache (not available in private windows)
+        } catch (e) {}
+        return db;
+      })();
+    return fbInitP;
+  }
+  /**
+   * Sign in without showing anything (for the lock screen): anonymous signs in,
+   * 'none' needs nothing, Google only counts if this browser is already signed in.
+   * Resolves true when reading is allowed.
+   */
+  function fbQuietAuth() {
+    if (FIREBASE.signIn === "none") return Promise.resolve(true);
+    const auth = firebase.auth();
+    if (FIREBASE.signIn !== "google") return auth.signInAnonymously().then(() => true, () => false);
+    return new Promise((res) => {
+      const stop = auth.onAuthStateChanged((u) => {
+        stop();
+        res(!!u);
+      });
+    });
+  }
   /** Start Firebase. Returns false (and the app falls back) if anything fails. */
   async function fbStart() {
     try {
       setStatus("connecting to Firebase…");
-      await fbLoadSdk();
-      if (!firebase.apps.length) firebase.initializeApp(FIREBASE.config);
-      const db = firebase.firestore();
-      try {
-        await db.enablePersistence({ synchronizeTabs: true }); // offline cache (not available in private windows)
-      } catch (e) {}
+      const db = await fbInit();
       await fbAuth();
-      fb = { db, root: db.collection("teams").doc(String(FIREBASE.team)) };
+      fb = { db, root: db.collection("teams").doc(SAVE.fbTeam) }; // this save file's own space
       fbListen();
       return true;
     } catch (e) {
@@ -2685,6 +2837,203 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
       return false;
     }
   }
+
+  /* ==== 0. LOCK SCREEN (save files) =====================================
+     Shown before anything loads. Pick a save file, type its password, and
+     the app opens that file's data only. Each file has its own storage space
+     everywhere data is kept:
+       Firebase      teams/<FIREBASE.team>--<code>/…
+       Claude db     app/state-<code>
+       this browser  localStorage "xpq_<code>"
+     where <code> is made from the password (passwordCode). The password is
+     never stored; SAVE_FILES only keeps a one-way `check` to say "wrong
+     password". Unlocking lasts until the browser tab is closed
+     (sessionStorage); Settings → SWITCH SAVE FILE locks it again.
+
+     FILE NAMES: each file can be renamed from its Settings (pencil next to
+     the name). The lock screen shows names before any password, so names
+     aren't secret and live in a small shared record outside the files:
+       Firebase      teams/<FIREBASE.team>--files/data/names
+       Claude db     app/files
+       this browser  localStorage "xpq_names" (also a cache for the others) */
+
+  let SAVE = null; // the unlocked file: { name, slug, legacy, ls, db, fbTeam }
+
+  /** The storage code for a password (case and surrounding spaces ignored). */
+  const passwordCode = (pw) => sha256("cubicle-quest|" + String(pw).trim().toLowerCase());
+  /** The one-way check stored in SAVE_FILES for a password: sha256("check|" + code), first 16 hex digits. */
+  const saveCheck = (code) => sha256("check|" + code).slice(0, 16);
+  /** Turn an unlocked file into its storage locations. */
+  function saveSpace(i, code) {
+    const f = SAVE_FILES[i],
+      slug = code.slice(0, 24);
+    return { i, slug, legacy: !!f.legacy, ls: "xpq_" + slug, db: "state-" + slug, fbTeam: FIREBASE.team + "--" + slug };
+  }
+  // The lock screen uses the theme this browser last showed, so it matches the app
+  try {
+    document.documentElement.dataset.skin = localStorage.getItem("xpq_theme") || "retro";
+  } catch (e) {}
+
+  let gatePick = null; // index of the file chosen on the lock screen
+  /** Draw the lock screen. */
+  function gateDraw(err) {
+    $("#gate").innerHTML = `<div class="box gbox">
+      <div class="px glogo">⚔ CUBICLE QUEST ⚔</div>
+      <div class="px lab" style="text-align:center;margin:0 0 14px">CHOOSE A SAVE FILE</div>
+      <div class="gfiles">${SAVE_FILES.map(
+        (f, i) => `<button class="ghost px gfile${gatePick === i ? " on" : ""}" data-gf="${i}"><span class="gnum">${i + 1}</span><span class="gname">${esc(fileName(i))}</span><span aria-hidden="true">🔒</span></button>`,
+      ).join("")}</div>
+      ${
+        gatePick === null
+          ? ""
+          : `<div class="gpw${err ? " shake" : ""}">
+          <label class="px lab" for="gatePw">PASSWORD FOR <span class="gname">${esc(fileName(gatePick).toUpperCase())}</span></label>
+          <div class="row2" style="flex-wrap:nowrap;margin:0"><input id="gatePw" type="password" autocomplete="off" spellcheck="false" style="flex:1"><button class="px" id="gateGo">UNLOCK</button></div>
+          <div class="px gerr" role="alert">${err || ""}</div></div>`
+      }</div>`;
+    const pw = $("#gatePw");
+    if (pw) pw.focus();
+  }
+  /** Check the typed password and open the file. */
+  function gateTry() {
+    const pw = $("#gatePw").value;
+    if (!pw.trim()) return gateDraw("TYPE THE PASSWORD");
+    const code = passwordCode(pw);
+    if (saveCheck(code) !== SAVE_FILES[gatePick].check) {
+      sfx("oof");
+      return gateDraw("WRONG PASSWORD");
+    }
+    gateOpen(gatePick, code);
+  }
+  /** Unlock: remember for this tab, hide the lock screen, start the app. */
+  function gateOpen(i, code) {
+    SAVE = saveSpace(i, code);
+    try {
+      sessionStorage.setItem("xpq_unlocked", JSON.stringify({ i, code }));
+    } catch (e) {}
+    $("#gate").hidden = true;
+    document.body.classList.remove("locked");
+    init();
+  }
+  /* ---------- save-file names ---------- */
+  let fileNames = {}; // { fileIndex: "custom name" }; "" or missing = the default from SAVE_FILES
+  try {
+    fileNames = JSON.parse(localStorage.getItem("xpq_names") || "{}") || {};
+  } catch (e) {}
+  /** A file's current name: its custom name, or "File 1", "File 2"… */
+  const fileName = (i) => String(fileNames[i] || "").trim() || SAVE_FILES[i].name;
+  let namesSave = null; // writes one name to the shared record, once connected
+  let fileRenaming = false; // Settings is showing the rename box
+  /** New names arrived: cache them and update whatever is on screen. */
+  function namesGot(obj) {
+    if (!obj || typeof obj !== "object") return;
+    fileNames = Object.assign({}, obj);
+    try {
+      localStorage.setItem("xpq_names", JSON.stringify(fileNames));
+    } catch (e) {}
+    namesShow();
+  }
+  /** Refresh names on the lock screen (without wiping a typed password), status line and Settings. */
+  function namesShow() {
+    $$("#gate [data-gf] .gname").forEach((el) => (el.textContent = fileName(+el.closest("[data-gf]").dataset.gf)));
+    const lab = $("#gate label .gname");
+    if (lab && gatePick !== null) lab.textContent = fileName(gatePick).toUpperCase();
+    if (SAVE) setStatus(lastStatus);
+    if (SAVE && $("#smod").classList.contains("open") && !fileRenaming) drawSettings();
+  }
+  /** Connect to the shared names record (Firebase, or Claude's database). */
+  async function namesConnect() {
+    if (FIREBASE.config && FIREBASE.config.projectId) {
+      try {
+        const db = await fbInit();
+        if (!(await fbQuietAuth())) return; // Google sign-in not done yet: cached names for now
+        const ref = db.collection("teams").doc(FIREBASE.team + "--files").collection("data").doc("names");
+        ref.onSnapshot((s) => namesGot((s.data() || {}).items), () => {});
+        namesSave = (i, n) => ref.set({ items: { [i]: n } }, { mergeFields: [new firebase.firestore.FieldPath("items", String(i))] });
+      } catch (e) {}
+      return;
+    }
+    try {
+      const db = await claude.use("db");
+      if (!db) return;
+      const ref = db.doc("app/files");
+      ref.onSnapshot(
+        (s) => s.exists && s.data() && namesGot(s.data().names),
+        () => {},
+      );
+      namesSave = (i, n) => ref.set({ names: Object.assign({}, fileNames, { [i]: n }) });
+    } catch (e) {} // offline copy: names stay in this browser
+  }
+  /** Rename a save file (blank = back to the default name) and share it. */
+  function fileRename(i, raw) {
+    const name = String(raw || "").replace(/\s+/g, " ").trim().slice(0, 30);
+    fileNames = Object.assign({}, fileNames, { [i]: name === SAVE_FILES[i].name ? "" : name });
+    try {
+      localStorage.setItem("xpq_names", JSON.stringify(fileNames));
+    } catch (e) {}
+    if (namesSave)
+      Promise.resolve()
+        .then(() => namesSave(i, fileNames[i]))
+        .catch(() => toast("Couldn’t share the new name<br>It shows in this browser only."));
+    fileRenaming = false;
+    namesShow();
+    drawSettings();
+  }
+
+  /** Start-up: reopen the file unlocked earlier in this tab, or show the lock screen. */
+  function gateStart() {
+    namesConnect();
+    try {
+      const u = JSON.parse(sessionStorage.getItem("xpq_unlocked") || "null");
+      if (u && SAVE_FILES[u.i] && saveCheck(u.code) === SAVE_FILES[u.i].check) return gateOpen(u.i, u.code);
+    } catch (e) {}
+    document.body.classList.add("locked");
+    $("#gate").hidden = false;
+    gateDraw();
+  }
+  /** Lock again and go back to the file list (Settings → SWITCH SAVE FILE). */
+  function gateSwitch() {
+    try {
+      sessionStorage.removeItem("xpq_unlocked");
+    } catch (e) {}
+    location.reload();
+  }
+  $("#gate").addEventListener("click", (e) => {
+    const f = e.target.closest("[data-gf]");
+    if (f) {
+      gatePick = +f.dataset.gf;
+      gateDraw();
+    } else if (e.target.closest("#gateGo")) gateTry();
+  });
+  $("#gate").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.id === "gatePw") gateTry();
+  });
+  // Settings: switch file, and rename (pencil → box → SAVE / CANCEL, Enter / Esc)
+  $("#smod").addEventListener("click", (e) => {
+    if (e.target.closest("[data-switch]")) return gateSwitch();
+    const b = e.target.closest("[data-fname]");
+    if (!b || !SAVE) return;
+    if (b.dataset.fname === "edit") {
+      fileRenaming = true;
+      drawSettings();
+      const inp = $("#fileNameIn");
+      inp.focus();
+      inp.select();
+    } else if (b.dataset.fname === "save") fileRename(SAVE.i, $("#fileNameIn").value);
+    else {
+      fileRenaming = false;
+      drawSettings();
+    }
+  });
+  $("#smod").addEventListener("keydown", (e) => {
+    if (e.target.id !== "fileNameIn") return;
+    if (e.key === "Enter") fileRename(SAVE.i, e.target.value);
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      fileRenaming = false;
+      drawSettings();
+    }
+  });
 
   /* ==== 13. BOARD (main render) ========================================== */
 
@@ -2716,6 +3065,9 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
    */
   function render() {
     document.documentElement.dataset.skin = state.settings.theme;
+    try {
+      localStorage.setItem("xpq_theme", state.settings.theme); // so the lock screen matches next time
+    } catch (e) {}
     // Header text (skip the one being edited)
     const T = state.title || "CUBICLE QUEST",
       te = $("#title"),
@@ -3731,6 +4083,15 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
     const s = state.settings;
     $("#sbox").innerHTML =
       `<div class="row2"><h2 class="px" style="margin:0">SETTINGS</h2><button class="ghost px" data-close="1">✕</button></div>
+${
+        SAVE
+          ? `<div class="sfile"><div class="px lab" style="margin:0 0 6px">SAVE FILE ${SAVE.i + 1}</div>${
+              fileRenaming
+                ? `<div class="row2" style="flex-wrap:nowrap;margin:0"><input id="fileNameIn" maxlength="30" value="${qa(fileName(SAVE.i))}" aria-label="Save file name" style="flex:1"><button class="px tiny" data-fname="save">SAVE</button><button class="ghost px tiny" data-fname="cancel">CANCEL</button></div><div class="sub" style="margin:6px 0 0">Everyone sees this name on the lock screen. Leave it blank to go back to “${esc(SAVE_FILES[SAVE.i].name)}”.</div>`
+                : `<div class="row2" style="justify-content:flex-start;margin:0;flex-wrap:nowrap"><span class="px sfname">${esc(fileName(SAVE.i))}</span><button class="pen" data-fname="edit" title="Rename this save file" aria-label="Rename this save file">${pix(PENCIL, "currentColor")}</button></div>`
+            }<button class="ghost px tiny" data-switch="1" style="margin-top:10px">🔒 SWITCH SAVE FILE</button></div>`
+          : ""
+      }
 <div class="px lab">THEME (SAVED FOR THE WHOLE TEAM)</div><div class="pick">${THEMES.map((t) => `<span class="chip${s.theme === t[0] ? " on" : ""}" data-th="${t[0]}">${t[1]}</span>`).join("")}</div>
 <div class="px lab">XP NEEDED PER LEVEL</div><input type="number" min="10" step="10" data-set="base" value="${s.base}">
 <div class="px lab">EXTRA XP PER LEVEL (%)</div><input type="number" min="0" max="100" step="1" data-set="growth" value="${s.growth}">
@@ -5639,7 +6000,7 @@ body.fri .card:nth-child(even) { animation-delay: -.55s }
     } else renderBuffs();
   }, 30000);
   drawIcons();
-  init();
+  gateStart(); // lock screen first; init() runs once a save file is unlocked
 })();
 </script>
 </body>
